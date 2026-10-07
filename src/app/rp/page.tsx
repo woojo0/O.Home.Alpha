@@ -2,7 +2,7 @@
 // 역극 (4.9) — 실시간 채팅형. 방 개설(자관 기반/자유) · 참여자에게만 존재 노출 ·
 // 캐릭터 선택 발화(테마색 말풍선) · 지문(/desc) · 메시지 수정/삭제 · 완결/공개 전환 · 로그(txt/html 저장 · RP LOG 올리기)
 // ※ 실시간 송수신·입력 중 표시·참여자 전원 동의는 Supabase Realtime 연동 시 활성화 (현재 localStorage)
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useLayoutEffect, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '@/lib/auth';
 import { useLocalList, newId } from '@/lib/postStore';
 import type { RpTyping } from '@/lib/rpStore';
@@ -19,10 +19,23 @@ import { CroppedBlobImg } from '@/components/ui/CropEditor';
 import { EditableDesc, PageTitle } from '@/components/ui/PageText';
 import { useToast } from '@/components/ui/Toast';
 import { RpLogModal } from '@/components/rp/RpLogModal';
+import { rpLogHtml, openLogWindow } from '@/lib/rpLog';
+import { isMsgSoundOn, setMsgSoundOn } from '@/lib/msgSound';
 import { Lightbox } from '@/components/ui/Lightbox';
 import { putBlob, BlobImg } from '@/lib/blobStore';
 
 /** 캐릭터 얼굴 칩 (썸네일 or 데모 플레이스홀더) */
+/** 알림음 종 픽토그램 (커플홈 사용자 요청 — 이모지 대신). 선은 currentColor: 켜짐은 테마색, 꺼짐은 회색에 빗금 */
+function BellIcon({ off }: { off: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.6 2.1H4.4z" />
+      <path d="M10 20.2a2 2 0 0 0 4 0" />
+      {off && <line x1="4" y1="4" x2="20" y2="20" />}
+    </svg>
+  );
+}
+
 function Face({ ch, className, crop }: { ch?: Character; className: string; crop?: CropValue }) {
   // 사진이 없으면 캐릭터 테마색 자리표시자 (커플홈 사용자 요청)
   // crop: 자관에서 잡은 1:1 얼굴 위치 (v2.1 사용자 제보 — 없으면 캐릭터의 3:4 썸네일 크롭)
@@ -76,6 +89,8 @@ export default function RpPage() {
   // 발화자 선택 — 관리자는 기반 자관 멤버 전부(+자유 개설이면 자캐 전부),
   // 회원은 권한(grants — 역극 플레이/편집)이 부여된 캐릭터만 (3차 회원-캐릭터 연결, v1.9)
   const rel = rels.find(r => r.id === sel?.relId);
+  // 자관에서 잡은 1:1 얼굴 위치 — 로그 모달(프로필 사진 옵션)에도 같은 값을 넘긴다
+  const faceOf = (c?: Character) => (c ? relFaceCrop(rel, sel?.auId, c) : undefined);
   /* 이 방이 어느 AU로 노는지 (v2.0 사용자 요청) — 방 안에서 쓰는 캐릭터를 통째로
      그 AU 프로필로 갈아 끼운다. 발화자 선택·말풍선·방 소제목이 모두 이 목록을 보므로
      한 곳만 바꾸면 전부 따라온다. AU가 없으면 원래 목록 그대로다(참조도 같다).
@@ -118,6 +133,49 @@ export default function RpPage() {
     const el = msgsRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [sel?.id, msgRows.length]);
+
+  /* 긴 방은 잘라서 보여 준다 (커플홈 사용자 요청 — 한 방이 너무 길어지면 렉). 글자 수 기준으로 최근 것부터
+     WINDOW_CHARS만큼(적어도 WINDOW_MIN개), 맨 위로 올리거나 「이전 대화 더보기」를 누르면 그만큼 더 보여 준다.
+     전체는 LOG → 전체보기(새 탭) */
+  const WINDOW_CHARS = 6000, WINDOW_MIN = 30;
+  const [moreChars, setMoreChars] = useState(0);
+  useEffect(() => { setMoreChars(0); }, [sel?.id]);
+  const allMsgs = sel ? msgsOf(sel) : [];
+  let visStart = allMsgs.length;
+  {
+    const budget = WINDOW_CHARS + moreChars;
+    let used = 0;
+    while (visStart > 0) {
+      used += (allMsgs[visStart - 1].text?.length ?? 0) + 24;
+      if (used > budget && allMsgs.length - (visStart - 1) > WINDOW_MIN) break;
+      visStart -= 1;
+    }
+  }
+  const visibleMsgs = allMsgs.slice(visStart);
+  const hiddenCount = visStart;
+  const keepScroll = useRef<number | null>(null);   // 더보기 전 scrollHeight — 끼워 넣은 만큼 내려 읽던 자리를 지킨다
+  const loadMore = () => {
+    const el = msgsRef.current;
+    if (el) keepScroll.current = el.scrollHeight;
+    setMoreChars(x => x + WINDOW_CHARS);
+  };
+  useLayoutEffect(() => {
+    const el = msgsRef.current;
+    if (el && keepScroll.current != null) { el.scrollTop += el.scrollHeight - keepScroll.current; keepScroll.current = null; }
+  }, [visStart]);
+  const onMsgsScroll = () => {
+    const el = msgsRef.current;
+    if (el && hiddenCount > 0 && el.scrollTop < 30 && keepScroll.current == null) loadMore();
+  };
+  // 메신저 모양에서 오른쪽(파란 말풍선)에 둘 캐릭터 — 보는 사람 기준 (내 권한 캐릭터, 관리자는 자캐)
+  const rightIds = user ? rpChars.filter(c => !!charGrant(c, user.id) || (!!c.own && isAdmin)).map(c => c.id) : [];
+  /* SHOW ALL (커플홈 사용자 요청) — 참여자 누구나, 관리자가 아니어도·모바일(머리줄 숨김)에서도 대화 전부를 새 탭 한 장으로.
+     방의 모양(대본/메신저) 그대로, 사진 없이 */
+  const showAll = () => {
+    if (!sel) return;
+    const style = sel.style === 'imsg' ? 'imsg' : 'script';
+    openLogWindow(sel.title, rpLogHtml({ title: sel.title, sub: roomLabel(sel) }, allMsgs, rpChars, { time: false, style, rightIds }));
+  };
 
   const [text, setText] = useState('');
 
@@ -328,6 +386,9 @@ export default function RpPage() {
 
   // 로그 (커플홈) — txt/html 저장 · RP LOG에 올리기. 예전의 HTML 내보내기(EXPORT)를 대신한다
   const [logOpen, setLogOpen] = useState(false);
+  // 알림음 켬/끔 (커플홈) — 브라우저마다. 처음 그릴 때는 서버와 같은 값(켬)으로 두고 마운트 뒤 읽는다
+  const [soundOn, setSoundOn] = useState(true);
+  useEffect(() => { setSoundOn(isMsgSoundOn()); }, []);
   useEffect(() => { setLogOpen(false); }, [sel?.id]);
 
   if (!loaded) return <section className="page" />;
@@ -389,12 +450,17 @@ export default function RpPage() {
         <div className="panel rp-rooms">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 6px 12px', flexShrink: 0 }}>
             <b style={{ fontSize: 12, letterSpacing: '.1em', color: 'var(--sub)' }}>MY ROOMS</b>
-            <button className="btn btn-dark" style={{ padding: '0 12px', height: 30, fontSize: 11 }}
-              onClick={() => {
-                // 커플홈 — 기반 자관은 대표 자관(첫 번째)부터 골라 둔다. 자유 개설은 셀렉트에서
-                setNRel(rels[0]?.id ?? 'none'); setNAu('base');
-                setNewOpen(true);
-              }}>＋ NEW ROOM</button>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              {/* 메시지 알림음 (커플홈) — 남의 새 발화가 오면 짧게 울린다. 브라우저마다 켜고 끈다 */}
+              <button className={`btn btn-ghost rp-bell${soundOn ? '' : ' off'}`} data-tip={soundOn ? '알림음 끄기' : '알림음 켜기'}
+                onClick={() => { setMsgSoundOn(!soundOn); setSoundOn(!soundOn); }}><BellIcon off={!soundOn} /></button>
+              <button className="btn btn-dark" style={{ padding: '0 12px', height: 30, fontSize: 11 }}
+                onClick={() => {
+                  // 커플홈 — 기반 자관은 대표 자관(첫 번째)부터 골라 둔다. 자유 개설은 셀렉트에서
+                  setNRel(rels[0]?.id ?? 'none'); setNAu('base');
+                  setNewOpen(true);
+                }}>＋ NEW ROOM</button>
+            </div>
           </div>
           <div className="rp-rooms-list">
             {myRooms.map(r => (
@@ -464,8 +530,17 @@ export default function RpPage() {
 
               {/* 메시지 영역을 감싸는 틀 — 「입력 중」 줄을 이 안에 겹쳐 띄워 영역 높이가 안 바뀌게 (스크롤 덜컹 방지) */}
               <div className="rp-msgs-wrap">
-              <div className={`rp-msgs${imsg ? ' imsg' : ''}`} ref={msgsRef}>
-                {msgsOf(sel).map((m, mi, arr) => {
+              <div className={`rp-msgs${imsg ? ' imsg' : ''}`} ref={msgsRef} onScroll={onMsgsScroll}>
+                {/* 잘라 둔 이전 대화 더보기 + SHOW ALL(전체를 새 탭 한 장으로) — 참여자 누구나 (커플홈) */}
+                {allMsgs.length > 0 && (
+                  <div className="rp-topbtns">
+                    {hiddenCount > 0 && (
+                      <button className="btn btn-ghost rp-more" onClick={loadMore}>이전 대화 더보기 ({hiddenCount})</button>
+                    )}
+                    <button className="btn btn-ghost rp-more" onClick={showAll}>SHOW ALL ↗</button>
+                  </div>
+                )}
+                {visibleMsgs.map((m, mi, arr) => {
                   const mine = m.authorId === user.id;
                   const acts = mine && (
                     <span className="m-act">
@@ -525,7 +600,7 @@ export default function RpPage() {
                             )}
                             {/* 한두 글자짜리는 말풍선이 찌그러져 보여 최소 폭을 둔다 */}
                             {(m.text || !m.imgId) && (
-                              <div className={`im-bub${m.text.trim().length <= 2 ? ' short' : ''}`}>{m.text}</div>
+                              <div className={`im-bub${m.text.trim().length <= 3 ? ' short' : ''}`}>{m.text}</div>
                             )}
                           </div>
                           {acts}
@@ -786,7 +861,9 @@ export default function RpPage() {
       {/* 역극 로그 — 열 때만 그린다 (게시판 목록도 그때 불러온다) */}
       {logOpen && sel && (
         <RpLogModal room={sel} msgs={msgsOf(sel)} chars={rpChars} sub={roomLabel(sel)}
-          isAdmin={isAdmin} onClose={() => setLogOpen(false)} />
+          isAdmin={isAdmin} onClose={() => setLogOpen(false)}
+          rightIds={rightIds}
+          faceInfo={Object.fromEntries(rpChars.map(c => [c.id, { ref: c.thumbId, crop: faceOf(c) }]))} />
       )}
 
       {/* 완결 확인 (삭제 아님 — END/CANCEL) */}
