@@ -5,7 +5,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { RpRoom, RpMessage } from '@/lib/rpStore';
 import type { Character, Visibility } from '@/lib/charStore';
-import { rpLogText, rpLogHtml, rpLogRange, rpLogLastDate, rpSpeakers, logFileName, downloadText, openLogWindow } from '@/lib/rpLog';
+import { rpLogText, rpLogHtml, rpLogRange, rpLogLastDate, rpSpeakers, logFileName, downloadText, openLogWindow, rpLogSrcFits, type RpLogSrc } from '@/lib/rpLog';
+import { useAuth } from '@/lib/auth';
+import { useMenuSettings } from '@/lib/menuStore';
+import { useMembers } from '@/lib/members';
+import { trpgEditorIds } from '@/lib/trpgPerm';
 import { useLocalList, newId } from '@/lib/postStore';
 import { TrpgLog, TRPG_SEED, TrpgLogBody, TRPG_BODY_SEED, bodyVisibility, saveLogBody } from '@/lib/galleryStore';
 import { useSections, filterSection, secStamp, MAIN_SEC } from '@/lib/sectionStore';
@@ -19,14 +23,14 @@ const isHex = (c?: string) => !!c && /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(c);
 
 /** 얼굴 사진 정보 — 캐릭터 id → 파일 참조와 자관에서 잡아 둔 1:1 위치 */
 export type FaceInfo = Record<string, { ref?: string; crop?: CropValue }>;
-type Faces = Record<string, { url: string; style: string }>;
+export type Faces = Record<string, { url: string; style: string }>;
 
 /** React 스타일 객체 → 인라인 CSS 문자열 (로그 HTML은 문자열이라) */
 const cssOf = (s: React.CSSProperties) =>
   Object.entries(s).map(([k, v]) => `${k.replace(/[A-Z]/g, ch => '-' + ch.toLowerCase())}:${v}`).join(';');
 
 /** 말한 캐릭터들의 얼굴 주소·위치를 모은다 — 주소는 홈 저장소(서버 모드) 그대로, 위치는 그림 비율을 재서 역극 화면과 같은 식으로 */
-async function resolveFaces(speakers: Character[], info: FaceInfo): Promise<Faces> {
+export async function resolveFaces(speakers: Character[], info: FaceInfo): Promise<Faces> {
   const out: Faces = {};
   await Promise.all(speakers.map(async c => {
     const fi = info[c.id];
@@ -71,7 +75,7 @@ export function RpLogModal({ room, msgs, chars, sub, isAdmin, rightIds, faceInfo
   const facesBusy = withFaces && !faces;
   const text = useMemo(() => rpLogText({ title: room.title, sub }, msgs, chars, { time }),
     [room.title, sub, msgs, chars, time]);
-  const faceOpt = style === 'imsg' && withFaces && faces ? faces : undefined;
+  const faceOpt = withFaces && faces ? faces : undefined;   // 메신저·대본 모두 (사용자 요청: "대본 형식으로 선택해도 프로필 사진이")
   const html = () => rpLogHtml({ title: room.title, sub }, msgs, chars, { time, style, rightIds, faces: faceOpt });
 
   // 파일은 방 제목으로. txt 앞의 BOM은 오래된 편집기에서도 한글이 깨지지 않게 하려는 것
@@ -95,14 +99,12 @@ export function RpLogModal({ room, msgs, chars, sub, isAdmin, rightIds, faceInfo
           </div>
           <small className="hint" style={{ margin: 0 }}>HTML 저장 · 전체보기 · RP LOG 본문에 쓰입니다 (TXT는 글만)</small>
         </div>
-        {style === 'imsg' && (
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-            <KCheck label="프로필 사진 넣기" checked={withFaces} onChange={setWithFaces} />
-            <small className="hint" style={{ margin: 0 }}>
-              {facesBusy ? '사진 주소를 불러오는 중…' : '상대 캐릭터 말풍선 옆에 얼굴 — 주소는 홈 저장소의 것을 그대로 씁니다'}
-            </small>
-          </div>
-        )}
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <KCheck label="프로필 사진 넣기" checked={withFaces} onChange={setWithFaces} />
+          <small className="hint" style={{ margin: 0 }}>
+            {facesBusy ? '사진 주소를 불러오는 중…' : style === 'imsg' ? '말풍선 옆에 얼굴 — 주소는 홈 저장소의 것을 그대로 씁니다' : '이름 앞에 얼굴 — 주소는 홈 저장소의 것을 그대로 씁니다'}
+          </small>
+        </div>
         <div>
           <label className="k-label">미리보기</label>
           <pre className="rp-log-pre">{text}</pre>
@@ -130,6 +132,9 @@ function PostToTrpg({ room, msgs, chars, sub, time, style, rightIds, faces, face
   const [bodies, setBodies, bodiesLoaded] = useLocalList<TrpgLogBody>('ohome.trpgbody.v1', TRPG_BODY_SEED);
   const { list } = useSections();
   const secs = list('trpg');   // RP LOG를 여러 개로 만들었으면 어디에 올릴지 고른다
+  const { user } = useAuth();
+  const [menuSet] = useMenuSettings();
+  const members = useMembers();   // 등록 권한이 있는 회원 = 수정 가능 (trpgEditorIds)
 
   const [title, setTitle] = useState(room.title);
   const [catchphrase, setCatchphrase] = useState('');
@@ -154,6 +159,9 @@ function PostToTrpg({ room, msgs, chars, sub, time, style, rightIds, faces, face
         // 게시판 본문은 좌우를 정하지 않는다 — 보는 사람에 따라 상세 페이지가 정한다 (커플홈 사용자 요청)
         ? rpLogHtml(info, msgs, chars, { time, forBoard: true, style, rightIds, faces, neutralSides: true })
         : rpLogText(info, msgs, chars, { time, forBoard: true });
+      // 원본 발화도 함께 — 올린 뒤 상세의 「본문 편집」에서 발화를 고치고 같은 모양으로 다시 그릴 수 있게 (커플홈 사용자 요청)
+      const src: RpLogSrc = { msgs, style, fmt, faces: !!faces, time };
+      const editorIds = trpgEditorIds(menuSet, secId, members);
       const log: TrpgLog = {
         id,
         no: Math.max(0, ...filterSection(logsAll, secId).map(l => l.no)) + 1,   // 그 게시판 안의 순번
@@ -171,6 +179,8 @@ function PostToTrpg({ room, msgs, chars, sub, time, style, rightIds, faces, face
         thumbColor: colors.length
           ? { c1: colors[0], c2: colors[1] }
           : { c1: '#4c5a6e', c2: '#242b36' },
+        authorId: user?.id,
+        editorIds,
         ...secStamp(secId),
       };
       // 본문은 목록과 분리 저장 — RP LOG 페이지의 등록과 같은 방식 (본문 문서는 뒤에 붙인다)
@@ -178,6 +188,9 @@ function PostToTrpg({ room, msgs, chars, sub, time, style, rightIds, faces, face
         id,
         ...(await saveLogBody(bodyText)),
         bodyHtml: fmt === 'html',
+        src: rpLogSrcFits(src) ? src : undefined,
+        authorId: user?.id,
+        editorIds,
         visibility: bodyVisibility(log),
         ...secStamp(secId),
       };
@@ -223,7 +236,7 @@ function PostToTrpg({ room, msgs, chars, sub, time, style, rightIds, faces, face
           {busy ? '올리는 중…' : postedId ? '올렸습니다' : !ready ? '불러오는 중…' : '＋ RP LOG에 올리기'}
         </button>
         {postedId && (
-          <button className="btn btn-ghost" onClick={() => router.push(`/trpg/${postedId}`)}>올린 로그 보기 ›</button>
+          <button className="btn btn-ghost" onClick={() => router.push(`/log/${postedId}`)}>올린 로그 보기 ›</button>
         )}
       </div>
     </div>

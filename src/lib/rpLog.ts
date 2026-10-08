@@ -18,11 +18,33 @@ export interface RpLogOpts {
   style?: 'script' | 'imsg';
   /** 메신저 모양에서 오른쪽(파란 말풍선)에 둘 캐릭터 id — 저장하는 사람이 방에서 보던 그대로 */
   rightIds?: string[];
-  /** 프로필 사진 (커플홈 사용자 요청) — 캐릭터 id → 주소(홈 저장소)와 얼굴칸 안 위치(인라인 스타일). 없으면 사진 없이 */
+  /** 프로필 사진 (커플홈 사용자 요청) — 캐릭터 id → 주소(홈 저장소)와 얼굴칸 안 위치(인라인 스타일). 없으면 사진 없이.
+   *  메신저 모양은 말풍선 옆에, 대본 모양은 이름 앞에 (사용자 요청: "대본 형식으로 선택해도 프로필 사진이 떴으면") */
   faces?: Record<string, { url: string; style: string }>;
   /** 좌우를 정하지 않고 캐릭터 id만 적어 둔다 (RP LOG 게시판용) — 보는 사람에 따라 상세 페이지가 applyLogSides로 정한다 */
   neutralSides?: boolean;
+  /** 머리의 기간·대화 수 줄을 빼고 이름과 내용만 (커플홈 사용자 요청 — 디스코드 가져오기: "시간 같은 건 안 남겼으면") */
+  noMeta?: boolean;
 }
+
+/** 역극 모양 로그의 원본 발화 (커플홈 사용자 요청 — "등록한 다음에 편집모드를 켜서 내용도 수정").
+ *  본문(HTML/텍스트)과 함께 RP LOG 본문 문서(TrpgLogBody.src)에 두면, 상세의 「본문 편집」이 발화를 고친 뒤
+ *  같은 모양으로 다시 그린다(rpLogSrc.ts) — 생성된 HTML을 되읽는 대신 원본을 들고 있는 편이 확실하다 */
+export interface RpLogSrc {
+  msgs: RpMessage[];
+  style: 'script' | 'imsg';
+  fmt: 'html' | 'text';
+  /** 프로필 사진 넣기 (HTML일 때 — 메신저·대본 모두) */
+  faces: boolean;
+  /** 시각 표시 */
+  time: boolean;
+  /** 머리의 기간·대화 수 줄 생략 */
+  noMeta?: boolean;
+}
+
+/** 원본 발화를 본문 문서에 함께 둘 수 있는 크기 — Firestore 문서 상한(1MB) 안쪽. 넘으면 원본 없이 본문만 (그 로그는 글로만 고친다) */
+export const RP_SRC_MAX = 400_000;
+export const rpLogSrcFits = (src: RpLogSrc) => JSON.stringify(src).length <= RP_SRC_MAX;
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const ymd = (iso: string) => {
@@ -68,7 +90,7 @@ const nameOf = (chars: Character[], id?: string) =>
 export function rpLogText(info: RpLogInfo, msgs: RpMessage[], chars: Character[], opts: RpLogOpts): string {
   const head = [
     ...(opts.forBoard ? [] : [info.title, ...(info.sub ? [info.sub] : [])]),
-    [rpLogRange(msgs), `대화 ${msgs.length}개`].filter(Boolean).join(' · '),
+    ...(opts.noMeta ? [] : [[rpLogRange(msgs), `대화 ${msgs.length}개`].filter(Boolean).join(' · ')]),
     '─'.repeat(28),
   ];
   const body: string[] = [];
@@ -109,14 +131,14 @@ function imsgRows(msgs: RpMessage[], chars: Character[], opts: RpLogOpts): strin
     const txt = m.text || (m.imgId ? '[사진]' : '');
     if (m.kind !== 'char') {
       const dm = m.text.trim().match(DATE_RE);
-      rows.push(`<div class="sys${dm ? ' date' : ''}">${dm ? `<b>${esc(dm[1])}</b>${esc(dm[2])}` : esc(txt)}</div>`);
+      rows.push(`<div class="sys${dm ? ' date' : ''}" data-i="${i}">${dm ? `<b>${esc(dm[1])}</b>${esc(dm[2])}` : esc(txt)}</div>`);
       return;
     }
     const me = right.has(m.charId ?? '');
     if (m.rp) {
       const c = chars.find(x => x.id === m.charId);
       const hex = safeHex(c?.color);
-      rows.push(`<div class="m${!opts.neutralSides && me ? ' me' : ''}" data-c="${esc(m.charId ?? '')}" style="--c:${hex};--rgb:${hexRgb(hex)}"><div class="who">${esc(nameOf(chars, m.charId))}</div><div class="txt">${esc(txt)}</div></div>`);
+      rows.push(`<div class="m${!opts.neutralSides && me ? ' me' : ''}" data-c="${esc(m.charId ?? '')}" data-i="${i}" style="--c:${hex};--rgb:${hexRgb(hex)}"><div class="who">${faceTag(opts, m.charId)}<span>${esc(nameOf(chars, m.charId))}</span></div><div class="txt">${esc(txt)}</div></div>`);
       return;
     }
     const prev = msgs[i - 1], next = msgs[i + 1];
@@ -131,9 +153,16 @@ function imsgRows(msgs: RpMessage[], chars: Character[], opts: RpLogOpts): strin
     const f = opts.faces?.[m.charId ?? ''];
     const face = opts.faces ? `<span class="f">${f ? `<img src="${esc(f.url)}" style="${esc(f.style)}" alt="">` : ''}</span>` : '';
     const nm = nameNeeded && (opts.neutralSides || !me) ? `<div class="n">${esc(nameOf(chars, m.charId))}</div>` : '';
-    rows.push(`<div class="b${side}${first ? ' first' : ''}${last ? ' last' : ''}" data-c="${esc(m.charId ?? '')}">${face}<div class="col">${nm}<div class="bub${short ? ' short' : ''}">${esc(txt)}</div></div></div>`);
+    rows.push(`<div class="b${side}${first ? ' first' : ''}${last ? ' last' : ''}" data-c="${esc(m.charId ?? '')}" data-i="${i}">${face}<div class="col">${nm}<div class="bub${short ? ' short' : ''}">${esc(txt)}</div></div></div>`);
   });
   return rows;
+}
+
+/** 얼굴칸 — 사진 옵션을 켰을 때만 (사진이 없는 캐릭터는 빈 동그라미) */
+function faceTag(opts: RpLogOpts, charId?: string): string {
+  if (!opts.faces) return '';
+  const f = opts.faces[charId ?? ''];
+  return `<span class="f">${f ? `<img src="${esc(f.url)}" style="${esc(f.style)}" alt="">` : ''}</span>`;
 }
 
 const IMSG_CSS = `
@@ -173,7 +202,9 @@ body{margin:0;background:#f2f2f7;color:#111;font-family:-apple-system,'Pretendar
 .b.me.last .bub::after{right:-10px;border-bottom-left-radius:10px}
 .m{align-self:flex-start;max-width:82%;margin:10px 0;padding:9px 14px 10px;border-left:3px solid var(--c);background:rgba(var(--rgb),.08);border-radius:0 10px 10px 0}
 .m.me{align-self:flex-end;border-left:none;border-right:3px solid var(--c);border-radius:10px 0 0 10px}
-.m .who{font-size:12px;font-weight:700;color:var(--c);letter-spacing:.05em;margin-bottom:3px}
+.m .who{font-size:12px;font-weight:700;color:var(--c);letter-spacing:.05em;margin-bottom:3px;display:flex;align-items:center;gap:8px}
+.m .f{width:28px;height:28px;border-radius:50%;overflow:hidden;position:relative;flex-shrink:0;background:#d8d8dc}
+.m .f img{display:block}
 .m .txt{white-space:pre-wrap;word-break:break-word;line-height:1.75}
 `;
 
@@ -181,7 +212,8 @@ body{margin:0;background:#f2f2f7;color:#111;font-family:-apple-system,'Pretendar
  *  메신저 모양(opts.style 'imsg')은 아이폰 문자 말풍선 — 역극 페이지에서 보던 그대로 */
 export function rpLogHtml(info: RpLogInfo, msgs: RpMessage[], chars: Character[], opts: RpLogOpts): string {
   if (opts.style === 'imsg') {
-    const meta = [rpLogRange(msgs), `대화 ${msgs.length}개`].filter(Boolean).join(' · ');
+    const meta = opts.noMeta ? '' : [rpLogRange(msgs), `대화 ${msgs.length}개`].filter(Boolean).join(' · ');
+    const hdIn = `${opts.forBoard ? '' : `<h1>${esc(info.title)}</h1>${info.sub ? `<div class="sub">${esc(info.sub)}</div>` : ''}`}${meta ? `<div class="meta">${esc(meta)}</div>` : ''}`;
     return `<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -192,7 +224,7 @@ export function rpLogHtml(info: RpLogInfo, msgs: RpMessage[], chars: Character[]
 </head>
 <body>
 <div class="log">
-<div class="hd">${opts.forBoard ? '' : `<h1>${esc(info.title)}</h1>${info.sub ? `<div class="sub">${esc(info.sub)}</div>` : ''}`}${meta ? `<div class="meta">${esc(meta)}</div>` : ''}</div>
+${hdIn ? `<div class="hd">${hdIn}</div>` : ''}
 <div class="chat">
 ${imsgRows(msgs, chars, opts).join('\n')}
 </div>
@@ -203,7 +235,8 @@ ${imsgRows(msgs, chars, opts).join('\n')}
   }
   const rows: string[] = [];
   let day = '';
-  for (const m of msgs) {
+  // data-i = 발화 번호 — RP LOG 상세의 편집모드가 호버·우클릭한 발화를 알아보는 데 쓴다 (커플홈)
+  msgs.forEach((m, i) => {
     if (opts.time) {
       const d = ymd(m.date);
       if (d !== day) { day = d; rows.push(`<div class="day">${d}</div>`); }
@@ -212,12 +245,13 @@ ${imsgRows(msgs, chars, opts).join('\n')}
     if (m.kind === 'char') {
       const c = chars.find(x => x.id === m.charId);
       const hex = safeHex(c?.color);
-      rows.push(`<div class="m" style="--c:${hex};--rgb:${hexRgb(hex)}"><div class="who">${esc(nameOf(chars, m.charId))}${t}</div><div class="txt">${esc(m.text || (m.imgId ? '[사진]' : ''))}</div></div>`);
+      rows.push(`<div class="m" data-c="${esc(m.charId ?? '')}" data-i="${i}" style="--c:${hex};--rgb:${hexRgb(hex)}"><div class="who">${faceTag(opts, m.charId)}<span>${esc(nameOf(chars, m.charId))}</span>${t}</div><div class="txt">${esc(m.text || (m.imgId ? '[사진]' : ''))}</div></div>`);
     } else {
-      rows.push(`<div class="d">${t}${esc(m.text || (m.imgId ? '[사진]' : ''))}</div>`);
+      rows.push(`<div class="d" data-i="${i}">${t}${esc(m.text || (m.imgId ? '[사진]' : ''))}</div>`);
     }
-  }
-  const meta = [rpLogRange(msgs), `대화 ${msgs.length}개`].filter(Boolean).join(' · ');
+  });
+  const meta = opts.noMeta ? '' : [rpLogRange(msgs), `대화 ${msgs.length}개`].filter(Boolean).join(' · ');
+  const hdIn = `${opts.forBoard ? '' : `<h1>${esc(info.title)}</h1>${info.sub ? `<div class="sub">${esc(info.sub)}</div>` : ''}`}${meta ? `<div class="meta">${esc(meta)}</div>` : ''}`;
   return `<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -233,7 +267,9 @@ body{margin:0;background:#f7f7f5;color:#2a2d33;font-family:'Pretendard','Noto Sa
 .hd .meta{font-size:11px;color:#9a9ea6;margin-top:5px;letter-spacing:.04em}
 .day{text-align:center;font-size:11px;color:#9a9ea6;letter-spacing:.16em;margin:26px 0 10px}
 .m{margin:10px 0;padding:9px 14px 10px;border-left:3px solid var(--c);background:rgba(var(--rgb),.08);border-radius:0 10px 10px 0}
-.m .who{font-size:12px;font-weight:700;color:var(--c);letter-spacing:.05em;margin-bottom:3px}
+.m .who{font-size:12px;font-weight:700;color:var(--c);letter-spacing:.05em;margin-bottom:3px;display:flex;align-items:center;gap:8px}
+.m .f{width:28px;height:28px;border-radius:50%;overflow:hidden;position:relative;flex-shrink:0;background:#d8d8dc}
+.m .f img{display:block}
 .m .txt{white-space:pre-wrap;word-break:break-word;line-height:1.75}
 .d{margin:18px 6%;text-align:center;color:#50555e;line-height:1.85;white-space:pre-wrap;word-break:break-word}
 .t{font-size:10px;font-weight:400;color:#a3a7ae;margin-left:8px;letter-spacing:.02em}
@@ -242,7 +278,7 @@ body{margin:0;background:#f7f7f5;color:#2a2d33;font-family:'Pretendard','Noto Sa
 </head>
 <body>
 <div class="log">
-<div class="hd">${opts.forBoard ? '' : `<h1>${esc(info.title)}</h1>${info.sub ? `<div class="sub">${esc(info.sub)}</div>` : ''}`}${meta ? `<div class="meta">${esc(meta)}</div>` : ''}</div>
+${hdIn ? `<div class="hd">${hdIn}</div>` : ''}
 ${rows.join('\n')}
 </div>
 </body>
