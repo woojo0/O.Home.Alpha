@@ -25,6 +25,10 @@ export function memberPool(): MemberLite[] {
   return base;
 }
 
+/** 회원 목록에서 관리자 id들 — 서버 모드는 role로, 브라우저 저장 모드는 목업 'admin' (role이 없다) */
+export const adminIdsOf = (members: MemberLite[]): string[] =>
+  members.filter(m => m.role === 'admin' || (!m.role && m.id === 'admin')).map(m => m.id);
+
 /** 화면에서 쓰는 회원 목록 — 서버 모드에서는 지금 홈의 가입 회원을 DB에서 가져온다 */
 export function useMembers(): MemberLite[] {
   const [list, setList] = useState<MemberLite[]>(() => (isServerMode() ? [] : memberPool()));
@@ -37,7 +41,9 @@ export function useMembers(): MemberLite[] {
       .then(rows => {
         if (!alive) return;
         setList(rows
-          .filter(r => !home || r.homeId === home)
+          // 총관리자(role admin)는 어느 홈에도 속하지 않지만 모든 홈의 당사자다 — adminIdsOf(역극 참여 판정)가
+          // 비지 않게 목록에 넣는다 (lounell ba7d1ff 이식: 회원이 만든 자관 기반 방이 관리자에게 보이게)
+          .filter(r => !home || r.homeId === home || r.role === 'admin')
           .map(r => ({ id: r.id, nickname: r.nickname, role: r.role })));
       })
       .catch(() => { /* 권한·네트워크 문제면 빈 목록 */ });

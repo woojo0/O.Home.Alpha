@@ -51,7 +51,7 @@ const fmtHM = (iso: string) => {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
-import { useMembers } from '@/lib/members';
+import { useMembers, adminIdsOf } from '@/lib/members';
 import { pushNotif } from '@/lib/notifStore';
 
 export default function RpPage() {
@@ -66,7 +66,9 @@ export default function RpPage() {
   const msgsOf = (r: RpRoom) => messagesFor(msgRows, r.id, r.messages);
   // 참여 회원 — 기반 자관이 있으면 그 자관 캐릭터의 권한자에서 자동으로 (v2.0 사용자 확정).
   // 계산해서 쓰므로 권한이 다른 사람에게 넘어가면 그 자관 기반 역극 전체에 바로 반영된다
-  const memberIdsOf = (r: RpRoom) => rpMemberIds(r, rels, chars);
+  const pool = useMembers();
+  const adminIds = adminIdsOf(pool);   // 자관 기반 방은 운영자 자캐가 있으면 관리자도 당사자 (커플홈)
+  const memberIdsOf = (r: RpRoom) => rpMemberIds(r, rels, chars, adminIds);
   const [chars] = useLocalList<Character>('ohome.chars.v1', CHAR_SEED);
   const [rels] = useLocalList<Relation>('ohome.rels.v1', REL_SEED);
   const [selId, setSelId] = useState<string | null>(null);
@@ -80,7 +82,7 @@ export default function RpPage() {
     ? rooms.filter(r => memberIdsOf(r).includes(user.id))
       .sort((a, b) => rpLastDate(b, messagesFor(msgRows, b.id, b.messages))
         .localeCompare(rpLastDate(a, messagesFor(msgRows, a.id, a.messages))))
-    : []), [rooms, user, msgRows, rels, chars]);
+    : []), [rooms, user, msgRows, rels, chars, adminIds]);   // eslint-disable-line react-hooks/exhaustive-deps
   const myRooms = useMemo(() => allMine.filter(r => fStatus === 'all' || r.status === fStatus), [allMine, fStatus]);
   const sel = myRooms.find(r => r.id === selId) ?? myRooms[0];
   const cntS = (s: 'all' | 'ongoing' | 'done') =>
@@ -294,12 +296,11 @@ export default function RpPage() {
   const [nRel, setNRel] = useState('none');
   const [nAu, setNAu] = useState('base');   // 고른 자관의 AU (v2.0 사용자 요청)
   const [nMembers, setNMembers] = useState<string[]>([]);
-  const pool = useMembers();
   // 개설 모달에서 보여 줄 자동 참여자 (개설자 제외) — 권한자를 이름으로 (v2.0)
   const newRelGrantNames = (() => {
     if (nRel === 'none') return [] as string[];
     const ids = rpMemberIds(
-      { relId: nRel, createdBy: user?.id ?? '', memberIds: [] } as unknown as RpRoom, rels, chars);
+      { relId: nRel, createdBy: user?.id ?? '', memberIds: [] } as unknown as RpRoom, rels, chars, adminIds);
     return ids.filter(id => id !== user?.id)
       .map(id => pool.find(pp => pp.id === id)?.nickname ?? id);
   })();
@@ -558,8 +559,10 @@ export default function RpPage() {
                   );
                   if (m.kind === 'desc') {
                     // 메신저 모양에서는 지문이 아이폰 문자의 가운데 안내 글씨처럼.
-                    // 「2008.07.03」처럼 날짜로 시작하는 지문은 날짜 줄로 (사용자 요청 — 시각은 손으로 적는다)
-                    if (imsg && !m.rp) {
+                    // 「2008.07.03」처럼 날짜로 시작하는 지문은 날짜 줄로 (사용자 요청 — 시각은 손으로 적는다).
+                    // 「일반 RP」 토글을 켜고 보낸 지문도 똑같이 — 예전엔 그것만 대본 모양 지문으로 그려져 날짜 줄이
+                    // 두 가지 스타일로 보였다 (커플홈 사용자 제보: "지문 스타일이 달라졌는데 … 하나로 통일해줘"). 로그 HTML과 같은 규칙
+                    if (imsg) {
                       const dm = m.text.trim().match(/^(\d{4}\s?[.\-/]\s?\d{1,2}\s?[.\-/]\s?\d{1,2}\.?)([\s\S]*)$/);
                       return (
                         <div key={m.id} className={`im-sys${dm ? ' im-date' : ''}`}>
