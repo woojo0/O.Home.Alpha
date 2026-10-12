@@ -14,6 +14,7 @@ export const FIRESTORE_RULES = `rules_version = '2';
 //   homes/{homeId}                  { name, inviteCode, createdAt }
 //   homes/{homeId}/settings/{key}   { value }           ← 홈마다 테마·메뉴·폰트·메인 위젯
 //   homes/{homeId}/<콘텐츠>/{id}     { data, authorId, visibility, sort }
+//   homes/{homeId}/push_subs/{id}   ← 웹푸시 기기 구독 (회원별 · 콘텐츠 규칙 그대로 — 같은 홈 회원끼리 읽힌다)
 //
 // 누가 무엇을 보나
 //   · 비로그인: 아무것도 못 읽는다 (홈은 전부 로그인 뒤에만)
@@ -59,7 +60,7 @@ service cloud.firestore {
         'posts', 'guestbook', 'characters', 'relations', 'gallery', 'roadview',
         'trpg_logs', 'trpg_log_bodies', 'trpg_chars', 'dotori', 'playlog', 'rp_rooms', 'threads',
         'diary', 'memos', 'commissions', 'applicants', 'moods', 'comments', 'qa_answers', 'rp_messages',
-        'notifications', 'thread_posts', 'videos', 'rp_typing'
+        'notifications', 'thread_posts', 'videos', 'rp_typing', 'push_subs'
       ];
     }
 
